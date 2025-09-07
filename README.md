@@ -180,7 +180,7 @@ sudo nbd-client localhost 10809 /dev/nbd0 -N vram
         - WRITE: copy from libublk IO buffer via `VRamBuffer::write()`
         - FLUSH: succeed (VRAM is volatile)
         - DISCARD/WRITE_ZEROES: currently EOPNOTSUPP
-6.  The server runs until `Ctrl+C` is received.
+6.  The server runs until `Ctrl+C` or `SIGTERM` is received. For the ublk frontend, shutdown uses `kill_dev()` to stop the device and unwind cleanly (systemd-friendly).
 
 ---
 

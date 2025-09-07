@@ -20,7 +20,9 @@ pub struct UblkConfig {
 
 /// Start the ublk frontend server using libublk.
 ///
-/// Blocks current task until device shutdown (Ctrl+C or del_dev()).
+/// Blocks the current task until device shutdown (Ctrl-C or SIGTERM).
+/// Shutdown is coordinated via a CancellationToken; on cancellation we call
+/// UblkCtrl::kill_dev() to stop the device and let run_target unwind cleanly.
 pub async fn start_ublk_server<B>(
     backend: Arc<B>,
     cfg: UblkConfig,
