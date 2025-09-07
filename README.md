@@ -1,6 +1,6 @@
 # VRAM Block Device
 
-A Rust application that uses OpenCL to allocate GPU memory and exposes it as a block device using a NBD server implementation.
+A Rust application that uses OpenCL to allocate GPU memory and exposes it as a block device using either an NBD server or a ublk userspace block device (libublk).
 
 ---
 
@@ -28,8 +28,11 @@ cargo install vramblk
 
 - Rust toolchain (cargo, rustc)
 - OpenCL runtime and development libraries
-- `nbd-client` utility (for connecting the kernel NBD module to the server)
 - A compatible GPU with OpenCL support
+- For NBD: `nbd-client` utility (for connecting the kernel NBD module to the server)
+- For ublk: Linux kernel 6.0+ with the ublk driver (module: `ublk_drv`) available
+  - Load the driver if needed: `sudo modprobe ublk_drv`
+  - Access to `/dev/ublk-control` (root or suitable udev rules for unprivileged mode). See libublk README for example udev rules.
 
 ### On Ubuntu/Debian:
 
@@ -142,6 +145,7 @@ Replace `localhost:10809` with the listen address if you changed it, `/dev/nbd0`
 - `-e, --export-name <EXPORT_NAME>`: Export name advertised over NBD (default: "vram")
 - `-v, --verbose`: Enable verbose logging
 - `--list-devices`: List available OpenCL platforms and devices and exit
+- `--driver <DRIVER>`: Frontend driver to use: `nbd` or `ublk` (default: `nbd`)
 - `-h, --help`: Print help information
 - `-V, --version`: Print version information
 
@@ -164,12 +168,18 @@ sudo nbd-client localhost 10809 /dev/nbd0 -N vram
 1.  The `vramblk` executable parses arguments and initializes logging.
 2.  It calls `mlockall(MCL_CURRENT | MCL_FUTURE)` to lock its current and future memory pages into RAM, preventing swap-out.
 3.  It initializes OpenCL and allocates a buffer in GPU memory (`VRamBuffer`).
-4.  It starts a Tokio async runtime and binds a TCP listener.
-5.  For each incoming NBD client connection:
-    *   It spawns a blocking task.
-    *   It performs the NBD handshake using `nbd::server::handshake`.
-    *   It creates a `VramSeeker` struct wrapping the `VRamBuffer` which implements `std::io::{Read, Write, Seek}`.
-    *   It runs the NBD transmission loop using `nbd::server::transmission`, which calls the `VramSeeker` methods for I/O.
+4.  If `--driver nbd` (default):
+    *   Start a Tokio TCP listener and accept clients.
+    *   Perform the NBD handshake using `nbd::server::handshake`.
+    *   Wrap `VRamBuffer` in a `VramSeeker` implementing `std::io::{Read, Write, Seek}`.
+    *   Run the NBD transmission loop using `nbd::server::transmission`.
+5.  If `--driver ublk`:
+    *   Create a ublk device with libublk, set parameters (capacity from `VRamBuffer::size()`, logical block size default 4096).
+    *   Run per-queue io_uring loop and map requests:
+        - READ: copy into libublk IO buffer from `VRamBuffer::read()`
+        - WRITE: copy from libublk IO buffer via `VRamBuffer::write()`
+        - FLUSH: succeed (VRAM is volatile)
+        - DISCARD/WRITE_ZEROES: currently EOPNOTSUPP
 6.  The server runs until `Ctrl+C` is received.
 
 ---

@@ -4,14 +4,18 @@
 //! it to userspace via a  NBD server implementation.
 //! It attempts to lock its memory to prevent being swapped out.
 
+mod backend;
 mod nbd;
 mod opencl;
+mod ublk;
 
 use crate::nbd::{start_nbd_server, NbdConfig};
 use crate::opencl::{VRamBuffer, VRamBufferConfig};
+use crate::ublk::{start_ublk_server, UblkConfig};
+use tokio_util::sync::CancellationToken;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use opencl3::{
     device::{get_device_ids, Device, CL_DEVICE_TYPE_GPU},
     platform::get_platforms,
@@ -20,41 +24,54 @@ use std::sync::Arc;
 // Correct import name: MlockAllFlags
 use nix::sys::mman::{mlockall, MlockAllFlags};
 
+//// Frontend driver selection
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum Driver {
+    /// Network Block Device (existing implementation)
+    Nbd,
+    /// Userspace Block (ublk) using libublk
+    Ublk,
+}
+
 /// Command line arguments for the VRAM Block Device
 #[derive(Parser, Debug)]
-#[clap(
+#[command(
     name = "vramblk",
     about = "Expose GPU memory as a block device using a NBD server. Locks memory using mlockall.",
     version
 )]
 struct Args {
     /// Size of the block device (e.g., 512M, 2G, 1024). Defaults to MB if no suffix.
-    #[clap(short, long, value_parser = parse_size_string, default_value = "2048M")]
+    #[arg(short, long, value_parser = parse_size_string, default_value = "2048M")]
     size: u64, // Store size in bytes
 
     /// GPU device index to use (0 for first GPU)
-    #[clap(short, long, default_value = "0")]
+    #[arg(short, long, default_value = "0")]
     device: usize,
 
     /// OpenCL platform index
-    #[clap(short, long, default_value = "0")]
+    #[arg(short, long, default_value = "0")]
     platform: usize,
 
     /// Listen address for the NBD server (e.g., 127.0.0.1:10809 or [::1]:10809)
-    #[clap(short, long, default_value = "127.0.0.1:10809")]
+    #[arg(short, long, default_value = "127.0.0.1:10809")]
     listen_addr: String,
 
     /// Export name advertised over NBD
-    #[clap(short, long, default_value = "vram")]
+    #[arg(short, long, default_value = "vram")]
     export_name: String,
 
     /// Enable verbose logging
-    #[clap(short, long)]
+    #[arg(short, long)]
     verbose: bool,
 
     /// List available OpenCL platforms and devices and exit
-    #[clap(long)]
+    #[arg(long)]
     list_devices: bool,
+
+    /// Frontend driver to use
+    #[arg(long, value_enum, default_value_t = Driver::Nbd)]
+    driver: Driver,
 }
 
 /// Parses a size string (e.g., "512M", "2G") into bytes.
@@ -136,7 +153,11 @@ async fn main() -> Result<()> {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
-    log::info!("Starting VRAM Block Device (NBD Server)");
+    let driver_str = match args.driver {
+        Driver::Nbd => "NBD Server",
+        Driver::Ublk => "Ublk",
+    };
+    log::info!("Starting VRAM Block Device ({})", driver_str);
 
     // --- Lock process memory ---
     log::info!("Attempting to lock process memory using mlockall()...");
@@ -182,8 +203,48 @@ async fn main() -> Result<()> {
         export_name: args.export_name.clone(),
     };
 
-    // Start the NBD server (this function now runs until shutdown)
-    start_nbd_server(buffer, &nbd_config).await?;
+    // Start selected frontend
+    match args.driver {
+        Driver::Nbd => {
+            // NBD server runs until shutdown
+            start_nbd_server(buffer, &nbd_config).await?;
+        }
+        Driver::Ublk => {
+            // Default logical block size: 4096 bytes
+            let ublk_cfg = UblkConfig {
+                logical_block_size: 4096,
+            };
+
+            // Cooperative shutdown: Ctrl-C cancels token; server exits cleanly
+            let token = CancellationToken::new();
+            let cancel_task = {
+                let t = token.clone();
+                tokio::spawn(async move {
+                    #[cfg(unix)]
+                    {
+                        let mut term = tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::terminate(),
+                        )
+                        .expect("failed to install SIGTERM handler");
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {},
+                            _ = term.recv() => {},
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = tokio::signal::ctrl_c().await;
+                    }
+                    t.cancel();
+                })
+            };
+
+            // ublk server runs until shutdown
+            start_ublk_server(buffer, ublk_cfg, token).await?;
+            // Best-effort: stop the cancel task if still running
+            cancel_task.abort();
+        }
+    }
 
     log::info!("VRAM Block Device server has shut down.");
     Ok(())

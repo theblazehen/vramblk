@@ -3,7 +3,7 @@
 //! This module provides functionality to allocate and manage
 //! GPU memory buffers that will be exposed as block devices.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use opencl3::{
     command_queue::{self as cl_command_queue, CommandQueue},
     context::Context as ClContext,
@@ -143,10 +143,8 @@ impl VRamBuffer {
 
         unsafe {
             self.queue
-                .enqueue_read_buffer(&*buffer_guard, types::CL_FALSE, offset, data, &[])
-                .context("Failed to enqueue non-blocking read from buffer")?
-                .wait()
-                .context("Failed waiting for non-blocking read event")?;
+                .enqueue_read_buffer(&*buffer_guard, types::CL_TRUE, offset, data, &[])
+                .context("Failed to enqueue blocking read from buffer")?;
         }
 
         Ok(())
@@ -165,10 +163,8 @@ impl VRamBuffer {
 
         unsafe {
             self.queue
-                .enqueue_write_buffer(&mut *buffer_guard, types::CL_FALSE, offset, data, &[])
-                .context("Failed to enqueue non-blocking write to buffer")?
-                .wait()
-                .context("Failed waiting for non-blocking write event")?;
+                .enqueue_write_buffer(&mut *buffer_guard, types::CL_TRUE, offset, data, &[])
+                .context("Failed to enqueue blocking write to buffer")?;
         }
 
         Ok(())
