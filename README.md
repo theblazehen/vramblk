@@ -198,7 +198,11 @@ sudo nbd-client localhost 10809 /dev/nbd0 -N vram
 
 ## License
 
-MIT
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+
+See the [LICENSE](LICENSE) file for details.
 
 ---
 
